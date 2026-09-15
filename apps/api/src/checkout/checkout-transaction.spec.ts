@@ -14,11 +14,12 @@ describe('CheckoutService Transaction & Stock Reservation', () => {
 
   beforeEach(async () => {
     prismaService = {
-      $transaction: jest.fn((callback) => callback(prismaService)),
+      $transaction: jest.fn((callback, options) => callback(prismaService)),
     };
 
     productRepository = {
       findByIdForUpdateTx: jest.fn(),
+      findManyByIdsForUpdateTx: jest.fn(),
       decrementStockTx: jest.fn(),
     };
 
@@ -48,12 +49,14 @@ describe('CheckoutService Transaction & Stock Reservation', () => {
 
     orderRepository.findByIdempotencyKey.mockResolvedValue(null);
 
-    productRepository.findByIdForUpdateTx.mockResolvedValue({
-      id: 'prod-1',
-      name: 'Wireless Headphones',
-      stock: 10,
-      price: 150.0,
-    });
+    productRepository.findManyByIdsForUpdateTx.mockResolvedValue([
+      {
+        id: 'prod-1',
+        name: 'Wireless Headphones',
+        stock: 10,
+        price: 150.0,
+      },
+    ]);
 
     const mockOrder = {
       id: 'order-999',
@@ -81,7 +84,7 @@ describe('CheckoutService Transaction & Stock Reservation', () => {
 
     const result = await service.checkout(userId, dto);
 
-    expect(productRepository.findByIdForUpdateTx).toHaveBeenCalledWith(prismaService, 'prod-1');
+    expect(productRepository.findManyByIdsForUpdateTx).toHaveBeenCalledWith(prismaService, ['prod-1']);
     expect(productRepository.decrementStockTx).toHaveBeenCalledWith(prismaService, 'prod-1', 2);
     expect(orderRepository.createOrderTx).toHaveBeenCalledWith(
       prismaService,
@@ -103,12 +106,14 @@ describe('CheckoutService Transaction & Stock Reservation', () => {
 
     orderRepository.findByIdempotencyKey.mockResolvedValue(null);
 
-    productRepository.findByIdForUpdateTx.mockResolvedValue({
-      id: 'prod-low-stock',
-      name: 'Pour-Over Coffee Maker Set',
-      stock: 2, // Only 2 in stock, requested 5
-      price: 42.0,
-    });
+    productRepository.findManyByIdsForUpdateTx.mockResolvedValue([
+      {
+        id: 'prod-low-stock',
+        name: 'Pour-Over Coffee Maker Set',
+        stock: 2, // Only 2 in stock, requested 5
+        price: 42.0,
+      },
+    ]);
 
     await expect(service.checkout(userId, dto)).rejects.toThrow(InsufficientStockException);
 

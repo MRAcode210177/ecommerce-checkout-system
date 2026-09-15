@@ -74,23 +74,29 @@ export class OrdersService {
       );
     }
 
-    const refundedOrder = await this.prisma.$transaction(async (tx) => {
-      // Step 1: Create Refund record
-      await this.paymentRepository.createRefundTx(tx, {
-        orderId: order.id,
-        paymentId: successfulPayment.id,
-        amount: Number(order.totalAmount),
-        reason: dto.reason || 'Customer requested refund.',
-      });
+    const refundedOrder = await this.prisma.$transaction(
+      async (tx) => {
+        // Step 1: Create Refund record
+        await this.paymentRepository.createRefundTx(tx, {
+          orderId: order.id,
+          paymentId: successfulPayment.id,
+          amount: Number(order.totalAmount),
+          reason: dto.reason || 'Customer requested refund.',
+        });
 
-      // Step 2: Restore stock for all items
-      for (const item of order.items) {
-        await this.productRepository.incrementStockTx(tx, item.productId, item.quantity);
-      }
+        // Step 2: Restore stock for all items
+        for (const item of order.items) {
+          await this.productRepository.incrementStockTx(tx, item.productId, item.quantity);
+        }
 
-      // Step 3: Transition order status to REFUNDED
-      return this.orderRepository.updateStatusTx(tx, order.id, OrderStatus.REFUNDED);
-    });
+        // Step 3: Transition order status to REFUNDED
+        return this.orderRepository.updateStatusTx(tx, order.id, OrderStatus.REFUNDED);
+      },
+      {
+        maxWait: 15000,
+        timeout: 30000,
+      },
+    );
 
     const updated = await this.orderRepository.findById(refundedOrder.id);
     return this.formatOrderResponse(updated);

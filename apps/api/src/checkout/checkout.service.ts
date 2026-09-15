@@ -25,56 +25,66 @@ export class CheckoutService {
       }
     }
 
-    // Execute atomic checkout transaction
-    const createdOrder = await this.prisma.$transaction(async (tx) => {
-      // Sort items by productId to prevent potential database deadlocks in concurrent multi-item transactions
-      const sortedItems = [...dto.items].sort((a, b) => a.productId.localeCompare(b.productId));
+    // Execute atomic checkout transaction with extended timeout for cloud databases (30s timeout)
+    const createdOrder = await this.prisma.$transaction(
+      async (tx) => {
+        // Sort items by productId to prevent potential database deadlocks in concurrent multi-item transactions
+        const sortedItems = [...dto.items].sort((a, b) => a.productId.localeCompare(b.productId));
+        const productIds = sortedItems.map((i) => i.productId);
 
-      const orderItemPayloads: { productId: string; quantity: number; priceAtPurchase: number }[] = [];
-      let calculatedTotal = 0;
+        // Step 1: Batch Row-level lock (SELECT ... WHERE id IN (...) ORDER BY id FOR UPDATE) in 1 round-trip
+        const lockedProducts = await this.productRepository.findManyByIdsForUpdateTx(tx, productIds);
+        const productMap = new Map(lockedProducts.map((p) => [p.id, p]));
 
-      for (const item of sortedItems) {
-        // Step 1: Row-level lock (SELECT ... FOR UPDATE)
-        const lockedProduct = await this.productRepository.findByIdForUpdateTx(tx, item.productId);
+        const orderItemPayloads: { productId: string; quantity: number; priceAtPurchase: number }[] = [];
+        let calculatedTotal = 0;
 
-        if (!lockedProduct) {
-          throw new ResourceNotFoundException('Product', item.productId);
+        for (const item of sortedItems) {
+          const lockedProduct = productMap.get(item.productId);
+
+          if (!lockedProduct) {
+            throw new ResourceNotFoundException('Product', item.productId);
+          }
+
+          // Step 2: Stock validation
+          if (lockedProduct.stock < item.quantity) {
+            throw new InsufficientStockException(
+              item.productId,
+              lockedProduct.name,
+              item.quantity,
+              lockedProduct.stock,
+            );
+          }
+
+          const unitPrice = Number(lockedProduct.price);
+          calculatedTotal += unitPrice * item.quantity;
+
+          orderItemPayloads.push({
+            productId: item.productId,
+            quantity: item.quantity,
+            priceAtPurchase: unitPrice,
+          });
+
+          // Step 3: Decrement stock
+          await this.productRepository.decrementStockTx(tx, item.productId, item.quantity);
         }
 
-        // Step 2: Stock validation
-        if (lockedProduct.stock < item.quantity) {
-          throw new InsufficientStockException(
-            item.productId,
-            lockedProduct.name,
-            item.quantity,
-            lockedProduct.stock,
-          );
-        }
+        // Step 4: Create Order with price snapshots
+        const order = await this.orderRepository.createOrderTx(
+          tx,
+          userId,
+          orderItemPayloads,
+          Math.round(calculatedTotal * 100) / 100,
+          dto.idempotencyKey,
+        );
 
-        const unitPrice = Number(lockedProduct.price);
-        calculatedTotal += unitPrice * item.quantity;
-
-        orderItemPayloads.push({
-          productId: item.productId,
-          quantity: item.quantity,
-          priceAtPurchase: unitPrice,
-        });
-
-        // Step 3: Decrement stock
-        await this.productRepository.decrementStockTx(tx, item.productId, item.quantity);
-      }
-
-      // Step 4: Create Order with price snapshots
-      const order = await this.orderRepository.createOrderTx(
-        tx,
-        userId,
-        orderItemPayloads,
-        Math.round(calculatedTotal * 100) / 100,
-        dto.idempotencyKey,
-      );
-
-      return order;
-    });
+        return order;
+      },
+      {
+        maxWait: 15000, // Maximum time Prisma Client waits to get a connection from the pool (15s)
+        timeout: 30000, // Maximum time the interactive transaction can run (30s for remote cloud DBs)
+      },
+    );
 
     return this.formatOrderResponse(createdOrder);
   }

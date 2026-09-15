@@ -57,12 +57,20 @@ export class ProductRepository {
     });
   }
 
-  // Row-level lock fetch inside a transaction
+  // Row-level lock fetch inside a transaction for a single product
   async findByIdForUpdateTx(tx: Prisma.TransactionClient, id: string): Promise<{ id: string; stock: number; price: Prisma.Decimal; name: string } | null> {
     const result = await tx.$queryRaw<{ id: string; stock: number; price: any; name: string }[]>`
       SELECT "id", "stock", "price", "name" FROM "Product" WHERE "id" = ${id} FOR UPDATE
     `;
     return result.length > 0 ? result[0] : null;
+  }
+
+  // Row-level lock fetch inside a transaction for multiple products (batch lock in 1 roundtrip)
+  async findManyByIdsForUpdateTx(tx: Prisma.TransactionClient, ids: string[]): Promise<{ id: string; stock: number; price: Prisma.Decimal; name: string }[]> {
+    if (ids.length === 0) return [];
+    return tx.$queryRaw<{ id: string; stock: number; price: any; name: string }[]>`
+      SELECT "id", "stock", "price", "name" FROM "Product" WHERE "id" IN (${Prisma.join(ids)}) ORDER BY "id" ASC FOR UPDATE
+    `;
   }
 
   async decrementStockTx(tx: Prisma.TransactionClient, id: string, quantity: number): Promise<void> {
